@@ -1,57 +1,46 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-코스피200(≈KODEX 200) 무로그인 스크리너 — KRX OpenAPI + Naver 기반
+코스피200 스크리너 — KRX OpenAPI + Naver + (로그인) PER/PBR + DART
 
-[인증] KRX 로그인 안 함. .env 의 API= 인증키만 사용(krx_openapi 경유).
-       개별종목 기술적 지표용 OHLCV 는 pykrx Naver(무인증).
+[유니버스] 로그인 시 KRX 지수구성종목(MDCSTAT00601) 자동 → 수동 명단 → 시총상위200.
+[가치]     PER/PBR/배당 = KRX 공식값(로그인). 없으면 가치 팩터 제외.
+[가점]     기술적(Naver) + DART(성장성/ROE/부채, 금융·보험 부채감점 면제).
 
-[데이터 한계]
-  - KRX OpenAPI 엔 PER/PBR/배당 없음 -> '가치' 팩터 미포함(모멘텀/유동성/사이즈/기술적).
-  - 코스피200 정확한 구성종목 명단 미제공 -> 'KOSPI 시총 상위 200'을 근사 유니버스로 사용.
-
-[결과] kospi200_screen.json 생성.
-
-[주의] 투자 자문 아님. 공개데이터 기반 단순 스크리닝. 투자 판단·손익 책임은 사용자.
+[결과] results/kospi200_screen.json
+[주의] 투자 자문 아님. 출력 수치는 실측/실측기반만(DESIGN.md 데이터 원칙).
 """
 
 import os
-import re
 import json
 import datetime
 
 import pandas as pd
 
-# pykrx import 전에 .env 로드(KRX_ID/KRX_PW/DART_API). 로그인 경로 대비.
-# DART_API 가 비어 있으면 KRX 로그인으로 get_market_fundamental 사용.
+# .env 로드(KRX_ID/KRX_PW → 로그인 세션 판단에 os.getenv 사용).
 try:
     from dotenv import load_dotenv
-    _here = os.path.dirname(os.path.abspath(__file__))
-    for _c in (os.path.join(_here, ".env"), os.path.join(_here, "pykrx-master", ".env")):
+    from .paths import env_candidates
+    for _c in env_candidates():
         if os.path.exists(_c):
             load_dotenv(_c)
             break
 except Exception:
     pass
 
-import krx_naver              # 자체 Naver OHLCV 클라 (pykrx 비의존)
-import krx_login              # 자체 KRX 로그인 PER/PBR 클라 (pykrx 비의존)
-import krx_openapi             # KRX OpenAPI (인증키)
+from .clients import naver, login, openapi
 try:
-    import krx_dart            # OpenDART (성장성/안정성 팩터). 키 없으면 None.
+    from .clients import dart
 except Exception:
-    krx_dart = None
+    dart = None
+from .loaders import load_members, load_held
+from .paths import RESULTS_DIR
 
-# 출력 위치 = 스크립트 폴더 아래 results/. 없으면 생성.
-_HERE = os.path.dirname(os.path.abspath(__file__))
-OUT_DIR = os.path.join(_HERE, "results")
+OUT_DIR = RESULTS_DIR
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# 코스피200 실제 구성종목 명단(선택). 형식은 README 참조. 있으면 시총상위200 근사 대신 사용.
-MEMBERS_FILE = os.path.join(_HERE, "kospi200_members.json")
-MEMBERS_MIN = 150      # 이 미만이면 명단 불완전으로 보고 폴백
-
-UNIVERSE_TOP = 200     # 시총 상위 N = 코스피200 근사
+MEMBERS_MIN = 150      # 구성종목 명단이 이 미만이면 불완전으로 보고 폴백
+UNIVERSE_TOP = 200     # 시총 상위 N = 코스피200 근사(폴백)
 STAGE2_POOL = 25       # 기술적 확인 대상
 TOP_N = 12             # 최종 출력
 MOMENTUM_TDAYS = 20    # 모멘텀 기준 거래일 수
@@ -72,8 +61,8 @@ def _recent_trading_snapshot(start_dt):
     for d in _weekdays_back(start_dt):
         bas = d.strftime("%Y%m%d")
         try:
-            df = krx_openapi.stock_daily(bas, "KOSPI")
-        except krx_openapi.KrxApiError:
+            df = openapi.stock_daily(bas, "KOSPI")
+        except openapi.KrxApiError:
             continue
         if df is not None and not df.empty and df["TDD_CLSPRC"].fillna(0).gt(0).any():
             return bas, df
@@ -99,72 +88,24 @@ def krx_session():
     if not (os.getenv("KRX_ID") and os.getenv("KRX_PW")):
         return None
     try:
-        return krx_login.login()
+        return login.login()
     except Exception:
         return None
 
 
 def value_factors(today, session):
     """PER/PBR/DIV DataFrame(index=종목코드) 반환. 세션 없거나 불가하면 None.
-
-    KRX 공식값 = 로그인 세션으로 getJsonData(MDCSTAT03501) 호출. pykrx 비의존.
+    KRX 공식값 = 로그인 세션으로 getJsonData(MDCSTAT03501) 호출.
     """
     if session is None:
         return None
     try:
-        f = krx_login.fundamental(session, today, "KOSPI")  # index=종목코드, PER/PBR/DIV
+        f = login.fundamental(session, today, "KOSPI")
         if f is not None and not f.empty and "PER" in f.columns:
             return f[["PER", "PBR", "DIV"]]
     except Exception:
         return None
     return None
-
-
-def load_members():
-    """kospi200_members.json 에서 6자리 종목코드 추출(3형태 허용, README 참조).
-    반환: 코드 리스트(중복 제거, 순서 유지). 파일 없거나 비면 None.
-    """
-    if not os.path.exists(MEMBERS_FILE):
-        return None
-    try:
-        with open(MEMBERS_FILE, encoding="utf-8-sig") as f:   # BOM 허용
-            data = json.load(f)
-    except Exception:
-        return None
-    items = []
-    if isinstance(data, dict):
-        items = list(data.keys())
-    elif isinstance(data, list):
-        for it in data:
-            if isinstance(it, str):
-                items.append(it)
-            elif isinstance(it, dict):
-                items.append(it.get("code") or it.get("종목코드") or "")
-    seen, codes = set(), []
-    for x in items:
-        m = re.match(r'\s*(\d{6})', str(x))     # 앞 6자리 코드
-        if m and m.group(1) not in seen:
-            seen.add(m.group(1))
-            codes.append(m.group(1))
-    return codes or None
-
-
-def load_held():
-    """보유 국내종목 코드 집합을 portfolio.json 에서 로드(held 표시용). 없으면 빈 집합."""
-    path = os.path.join(_HERE, "portfolio.json")
-    if not os.path.exists(path):
-        return set()
-    try:
-        with open(path, encoding="utf-8-sig") as f:   # BOM 허용
-            d = json.load(f)
-    except Exception:
-        return set()
-    out = set()
-    for h in d.get("holdings") or []:
-        c = str(h.get("code") or "").strip()
-        if len(c) == 6 and c.isdigit():
-            out.add(c)
-    return out
 
 
 HELD = load_held()
@@ -183,15 +124,12 @@ def main():
     # KRX 로그인 1회(있으면) — PER/PBR + 코스피200 구성종목 둘 다 이 세션 사용.
     session = krx_session()
 
-    # === 2) 유니버스: 코스피200 실제 명단 우선, 없으면 시총 상위 200 근사 ===
-    #   1순위 로그인 세션의 KRX 지수구성종목(MDCSTAT00601, 정확·자동)
-    #   2순위 수동 kospi200_members.json
-    #   3순위 시총 상위 200 근사
+    # === 2) 유니버스: KRX 자동 명단 → 수동 명단 → 시총 상위 200 근사 ===
     cur = cur[cur["TDD_CLSPRC"].fillna(0) > 0].copy()
     members, members_src = None, None
     if session is not None:
         try:
-            m = krx_login.index_members(session, today, "1028")  # KOSPI200
+            m = login.index_members(session, today, "1028")  # KOSPI200
             if m and len(m) >= MEMBERS_MIN:
                 members, members_src = m, "KRX 지수구성종목(MDCSTAT00601)"
         except Exception:
@@ -213,40 +151,34 @@ def main():
 
     # === 3) 종목 메타(소속/구분) 결합 — 있으면 ===
     try:
-        base = krx_openapi.stock_base_info(today, "KOSPI")
+        base = openapi.stock_base_info(today, "KOSPI")
         meta_cols = [c for c in ("SECT_TP_NM", "SECUGRP_NM", "MKT_TP_NM") if c in base.columns]
         if meta_cols:
-            # stk_bydd_trd 에 이미 있는(대개 빈) 동일 컬럼은 버리고 base 값으로 교체
             cur = cur.drop(columns=[c for c in meta_cols if c in cur.columns]).join(
                 base[meta_cols], how="left")
-    except krx_openapi.KrxApiError:
+    except openapi.KrxApiError:
         meta_cols = []
 
     # === 4) 팩터 ===
-    # 모멘텀: 기간 수익률 (현재종가 / 과거종가 - 1)
     cur = cur.join(past["TDD_CLSPRC"].rename("PAST_CLS"), how="left")
     ret = (cur["TDD_CLSPRC"] / cur["PAST_CLS"] - 1) * 100
     cur["mom_pct"] = ret.round(2)
     f_mom = minmax(ret.clip(lower=-25, upper=40).fillna(0))
     f_mom = f_mom.where(ret <= 40, f_mom * 0.6)  # 과열 감점
 
-    # 유동성: 거래대금
     f_liq = minmax(cur["ACC_TRDVAL"].fillna(0).clip(upper=cur["ACC_TRDVAL"].quantile(0.95)))
-
-    # 사이즈: 시총 (대형 안정 가점, 약하게)
     f_size = minmax(cur["MKTCAP"].fillna(0).clip(upper=cur["MKTCAP"].quantile(0.95)))
 
     cur["f_momentum"] = f_mom.round(3)
     cur["f_liquidity"] = f_liq.round(3)
     cur["f_size"] = f_size.round(3)
 
-    # 가치 팩터(PER/PBR) — DART 미발급 시 KRX 로그인으로 획득. 불가하면 제외.
+    # 가치 팩터(PER/PBR) — KRX 공식값(로그인). 없으면 제외.
     vf = value_factors(today, session)
     value_on = vf is not None
     if value_on:
         cur = cur.join(vf, how="left")
-        # PER/PBR 은 KRX 공식값만 사용. 공식값 없는 종목(우선주 등)은 null 로 둠
-        # (가격비례 등 추측 계산 금지 — 주가/밸류는 실측값만).
+        # PER/PBR 은 KRX 공식값만. 공식값 없는 종목(우선주 등)은 null (추측 계산 금지).
         per = cur["PER"].where(cur["PER"] > 0)
         pbr = cur["PBR"].where(cur["PBR"] > 0)
         f_per = 1 - minmax(per.clip(upper=per.quantile(0.95)))
@@ -263,7 +195,7 @@ def main():
     tech = {}
     for code in pool.index:
         try:
-            o = krx_naver.ohlcv(code, h_start, today)
+            o = naver.ohlcv(code, h_start, today)
             o = o[o["거래량"] > 0]
             c = o["종가"].astype(float)
             if len(c) < 60:
@@ -291,26 +223,26 @@ def main():
         cur.loc[code, "score"] += bonus
 
     # === 5-b) DART 성장성/안정성 가점 (pool 한정, 키 있을 때만) ===
-    dart = {}
+    fundamentals = {}
     sectors = {}      # {종목코드: 업종버킷} — 부채 감점 면제 판정 + 출력용
-    if krx_dart is not None and (os.getenv("DART_API") or True):
+    if dart is not None:
         try:
-            cmap = krx_dart.load_corp_map()
+            cmap = dart.load_corp_map()
         except Exception:
             cmap = {}
         try:
-            sectors = krx_dart.sectors_for(list(pool.index), cmap)  # company.json, 캐시
+            sectors = dart.sectors_for(list(pool.index), cmap)  # company.json, 캐시
         except Exception:
             sectors = {}
         for code in pool.index:
-            cc = cmap.get(code) or cmap.get(krx_dart.base_code(code))  # 우선주->본주
+            cc = cmap.get(code) or cmap.get(dart.base_code(code))  # 우선주->본주
             if not cc:
                 continue
             _fy = now.year - 1                  # 최신 사업보고서(직전 회계연도), 미공시면 그 전년
-            fin = krx_dart.financials(cc, _fy) or krx_dart.financials(cc, _fy - 1)
+            fin = dart.financials(cc, _fy) or dart.financials(cc, _fy - 1)
             if not fin:
                 continue
-            dart[code] = fin
+            fundamentals[code] = fin
             b = 0.0
             if (fin.get("op_growth_pct") or 0) > 0:
                 b += 0.03
@@ -320,8 +252,8 @@ def main():
                 b += 0.03
             dr = fin.get("debt_ratio_pct")
             # 금융·보험은 구조적 고부채 -> 부채비율 감점 면제(업종 불리 교정)
-            if dr is not None and dr > 200 and not krx_dart.is_financial(sectors.get(code)):
-                b -= 0.03      # 고부채 감점
+            if dr is not None and dr > 200 and not dart.is_financial(sectors.get(code)):
+                b -= 0.03
             cur.loc[code, "score"] += b
 
     # === 6) 출력 ===
@@ -337,7 +269,7 @@ def main():
             "momentum_pct": None if pd.isna(r["mom_pct"]) else float(r["mom_pct"]),
             "trdval_won": None if pd.isna(r["ACC_TRDVAL"]) else int(r["ACC_TRDVAL"]),
             "mktcap_won": None if pd.isna(r["MKTCAP"]) else int(r["MKTCAP"]),
-            # 업종: DART KSIC 버킷 우선(금융/보험 등). 없으면 KRX SECT_TP_NM(대개 빈값) fallback.
+            # 업종: DART KSIC 버킷 우선. 없으면 KRX SECT_TP_NM(대개 빈값) fallback.
             "sector": (sectors.get(code)
                        or (None if pd.isna(r.get("SECT_TP_NM")) or not str(r.get("SECT_TP_NM")).strip()
                            else str(r.get("SECT_TP_NM")))),
@@ -352,12 +284,12 @@ def main():
             },
             "technical": tech.get(code),
             "fundamentals_dart": ({
-                "rev_growth_pct": dart[code].get("rev_growth_pct"),
-                "op_growth_pct": dart[code].get("op_growth_pct"),
-                "roe_pct": dart[code].get("roe_pct"),
-                "debt_ratio_pct": dart[code].get("debt_ratio_pct"),
-                "year": dart[code].get("year"),
-            } if code in dart else None),
+                "rev_growth_pct": fundamentals[code].get("rev_growth_pct"),
+                "op_growth_pct": fundamentals[code].get("op_growth_pct"),
+                "roe_pct": fundamentals[code].get("roe_pct"),
+                "debt_ratio_pct": fundamentals[code].get("debt_ratio_pct"),
+                "year": fundamentals[code].get("year"),
+            } if code in fundamentals else None),
         })
 
     out = {
@@ -365,13 +297,13 @@ def main():
         "as_of": today,
         "momentum_base": past_dd,
         "universe": universe_label,
-        "value_source": ("KRX 공식값 (자체 로그인 클라 krx_login)" if value_on else "없음(가치 팩터 제외)"),
+        "value_source": ("KRX 공식값 (로그인 클라 krxfree.clients.login)" if value_on else "없음(가치 팩터 제외)"),
         "method": (
             "모멘텀30/가치25/유동성25/사이즈20 + 기술적 가점"
             if value_on else
             "모멘텀55/유동성30/사이즈15 + 기술적 가점 (가치 미포함)"
         ),
-        "dart_factors": ("성장성/안정성 가점 적용(매출·영업익 성장률, ROE, 부채비율; 금융·보험은 부채 감점 면제)" if dart else "없음"),
+        "dart_factors": ("성장성/안정성 가점 적용(매출·영업익 성장률, ROE, 부채비율; 금융·보험은 부채 감점 면제)" if fundamentals else "없음"),
         "sector_source": ("DART 기업개황 induty_code(KSIC) 버킷" if sectors else "없음"),
         "disclaimer": "투자 자문 아님. 공개데이터 기반 단순 스크리닝. 투자 판단·손익 책임은 사용자.",
         "recommendations": recs,

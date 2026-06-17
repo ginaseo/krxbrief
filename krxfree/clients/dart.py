@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-OpenDART 클라이언트 — 성장성/안정성/수익성 팩터용 (KRX 엔 없는 데이터)
+OpenDART 클라이언트 — 성장성/안정성/업종 팩터용 (KRX 엔 없는 데이터)
 
 - 인증키: .env 의 DART_API
 - corp_code 매핑(종목코드->DART corp_code) 1회 다운로드 후 캐시(corp_map.json)
 - fnlttSinglAcntAll(단일회사 전체 재무제표)에서 매출/영업이익/순이익/자본/부채 추출
   -> 매출성장률, 영업이익성장률, ROE, 부채비율 계산
+- company.json(기업개황) induty_code(KSIC) -> 업종 버킷 (sector_map.json 캐시)
 
 [주의] 연결(CFS) 우선, 없으면 별도(OFS). 회계 구조상 근사치. 투자자문 아님.
 """
@@ -19,9 +20,10 @@ import xml.etree.ElementTree as ET
 
 import requests
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_CORP_MAP = os.path.join(_HERE, "corp_map.json")
-_SECTOR_MAP = os.path.join(_HERE, "sector_map.json")   # {종목코드: induty_code} 캐시
+from ..paths import env_candidates, data_path
+
+_CORP_MAP = data_path("corp_map.json")
+_SECTOR_MAP = data_path("sector_map.json")   # {종목코드: induty_code} 캐시
 BASE = "https://opendart.fss.or.kr/api"
 
 
@@ -31,7 +33,7 @@ def _key():
         return k
     try:
         from dotenv import dotenv_values
-        for c in (os.path.join(_HERE, ".env"), os.path.join(_HERE, "pykrx-master", ".env")):
+        for c in env_candidates():
             if os.path.exists(c):
                 v = dotenv_values(c)
                 if v.get("DART_API"):
@@ -55,7 +57,6 @@ def load_corp_map(force=False) -> dict:
         raise DartError(".env 에 DART_API 없음")
     r = requests.get(f"{BASE}/corpCode.xml", params={"crtfc_key": key}, timeout=60)
     if r.status_code != 200 or r.content[:2] != b"PK":
-        # JSON 에러 메시지일 수 있음
         raise DartError(f"corpCode 다운로드 실패: {r.text[:200]}")
     zf = zipfile.ZipFile(io.BytesIO(r.content))
     xml = zf.read(zf.namelist()[0])
@@ -101,11 +102,9 @@ def _num(s):
 
 def _pick(rows, ids, names):
     """매칭 항목의 (당기, 전기) 금액. account_id 우선(전체 1차 스캔) 후 이름 fallback."""
-    # 1차: account_id 정확 매칭 (이름 충돌 방지)
     for r in rows:
         if (r.get("account_id") or "").strip() in ids:
             return _num(r.get("thstrm_amount")), _num(r.get("frmtrm_amount"))
-    # 2차: account_nm 매칭
     for r in rows:
         if (r.get("account_nm") or "").strip() in names:
             return _num(r.get("thstrm_amount")), _num(r.get("frmtrm_amount"))
@@ -113,9 +112,7 @@ def _pick(rows, ids, names):
 
 
 def financials(corp_code: str, year: int, reprt="11011"):
-    """단일회사 재무지표 dict 반환. 실패 시 None.
-    fs_div: 연결(CFS) 우선, 비면 별도(OFS).
-    """
+    """단일회사 재무지표 dict 반환. 실패 시 None. fs_div: 연결(CFS) 우선, 비면 별도(OFS)."""
     key = _key()
     for fs in ("CFS", "OFS"):
         try:
@@ -158,7 +155,6 @@ def financials(corp_code: str, year: int, reprt="11011"):
             "ni_for_eps": ni_for_eps, "eq_for_bps": eq_for_bps,
             "rev_growth_pct": growth(rev_t, rev_p),
             "op_growth_pct": growth(op_t, op_p),
-            # ROE 도 지배주주 기준
             "roe_pct": (round(ni_for_eps / eq_for_bps * 100, 1)
                         if ni_for_eps is not None and eq_for_bps not in (None, 0) else None),
             "debt_ratio_pct": (round(li_t / eq_t * 100, 1)
@@ -252,7 +248,10 @@ def sectors_for(stock_codes, corp_map: dict) -> dict:
 
 
 def per_pbr(fin: dict, close: float, shares: float):
-    """지배주주 기준 PER/PBR 계산. (close=종가, shares=상장주식수)"""
+    """지배주주 기준 PER/PBR 계산. (close=종가, shares=상장주식수)
+
+    [주의] 근사값(KRX 공식값과 ±0~22% 차이). 출력엔 사용하지 않음 — DESIGN.md 데이터 원칙 참조.
+    """
     if not fin or not shares:
         return None, None
     ni = fin.get("ni_for_eps")

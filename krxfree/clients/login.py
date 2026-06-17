@@ -4,13 +4,14 @@
 KRX 로그인 + 내부 JSON API(getJsonData.cmd) 자체 클라이언트 — pykrx 비의존.
 
 - data.krx.co.kr 회원 로그인(JSESSIONID) 후, 사이트 내부 통계 API 호출.
-- 현재는 PER/PBR/배당(MDCSTAT03501)만 구현. (pykrx get_market_fundamental 대체)
+- PER/PBR/배당(MDCSTAT03501), 지수구성종목(MDCSTAT00601) 구현.
 - 인증: .env 의 KRX_ID / KRX_PW.
 """
 import os
-import time
 import requests
 import pandas as pd
+
+from ..paths import env_candidates
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -27,8 +28,7 @@ def _creds():
         return cid, cpw
     try:
         from dotenv import dotenv_values
-        here = os.path.dirname(os.path.abspath(__file__))
-        for c in (os.path.join(here, ".env"), os.path.join(here, "pykrx-master", ".env")):
+        for c in env_candidates():
             if os.path.exists(c):
                 v = dotenv_values(c)
                 if v.get("KRX_ID") and v.get("KRX_PW"):
