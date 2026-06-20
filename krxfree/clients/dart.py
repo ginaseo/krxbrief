@@ -261,6 +261,157 @@ def per_pbr(fin: dict, close: float, shares: float):
     return per, pbr
 
 
+# ---------- 공시 필터 (Phase1: 호재/악재 키워드 분류) ----------
+# report_nm 부분일치. 강한 악재는 후보 제외급, 중간 악재는 감점, 호재는 소폭 가점.
+HARD_NEGATIVE_KW = ("감자결정", "관리종목지정", "상장폐지", "횡령", "배임", "회생절차")
+SOFT_NEGATIVE_KW = ("유상증자결정", "전환사채권발행결정", "신주인수권부사채권발행결정", "교환사채권발행결정")
+POSITIVE_KW = ("자기주식취득결정", "자기주식취득신탁계약체결결정", "단일판매공급계약체결")
+
+
+def classify_disclosure(report_nm: str):
+    """공시 제목 -> 'hard_negative'/'soft_negative'/'positive'/None."""
+    nm = report_nm or ""
+    for kw in HARD_NEGATIVE_KW:
+        if kw in nm:
+            return "hard_negative"
+    for kw in SOFT_NEGATIVE_KW:
+        if kw in nm:
+            return "soft_negative"
+    for kw in POSITIVE_KW:
+        if kw in nm:
+            return "positive"
+    return None
+
+
+def disclosures(corp_code: str, bgn_de: str, end_de: str):
+    """기간 내 공시 목록(list.json) 원본 리스트.
+
+    키 없으면 기능 OFF로 보고 []. 네트워크/파싱/예상밖 상태코드는 **None**(조회 실패 = 모름)
+    — "공시 없음"(013, 정상 응답)과 절대 같은 값으로 섞지 않는다. 호출부가 None 을
+    "위험 없음"으로 오인하면 안 되기 때문(예: API 장애 시 보유종목을 '양호'로 오판).
+    """
+    key = _key()
+    if not key or not corp_code:
+        return []
+    try:
+        r = requests.get(f"{BASE}/list.json", params={
+            "crtfc_key": key, "corp_code": corp_code,
+            "bgn_de": bgn_de, "end_de": end_de, "page_count": 100,
+        }, timeout=30)
+        d = r.json()
+    except Exception:
+        return None
+    if d.get("status") == "013":   # 013 = 조회된 데이터 없음(정상, 진짜 빈 결과)
+        return []
+    if d.get("status") != "000":
+        return None
+    return d.get("list") or []
+
+
+def disclosure_flags(corp_code: str, bgn_de: str, end_de: str):
+    """기간 내 공시를 분류해 {"hard_negative": [...], "soft_negative": [...], "positive": [...]} 반환.
+    각 항목은 {"report_nm", "rcept_dt"}. 조회 자체가 실패하면 **None**(disclosures 참조)."""
+    items = disclosures(corp_code, bgn_de, end_de)
+    if items is None:
+        return None
+    out = {"hard_negative": [], "soft_negative": [], "positive": []}
+    for it in items:
+        cat = classify_disclosure(it.get("report_nm") or "")
+        if cat:
+            out[cat].append({"report_nm": it.get("report_nm"), "rcept_dt": it.get("rcept_dt")})
+    return out
+
+
+# ---------- 유상증자/CB 상세 (Phase2: 배정방식 + 희석규모로 감점폭 세분화) ----------
+def capital_increase_items(corp_code: str, bgn_de: str, end_de: str):
+    """유상증자결정(piicDecsn) 상세 목록. 키 없으면 []. 조회 실패는 None(disclosures 참조)."""
+    key = _key()
+    if not key or not corp_code:
+        return []
+    try:
+        r = requests.get(f"{BASE}/piicDecsn.json", params={
+            "crtfc_key": key, "corp_code": corp_code,
+            "bgn_de": bgn_de, "end_de": end_de,
+        }, timeout=30)
+        d = r.json()
+    except Exception:
+        return None
+    if d.get("status") == "013":
+        return []
+    if d.get("status") != "000":
+        return None
+    return d.get("list") or []
+
+
+def cb_issue_items(corp_code: str, bgn_de: str, end_de: str):
+    """전환사채권발행결정(cvbdIsDecsn) 상세 목록. 키 없으면 []. 조회 실패는 None(disclosures 참조)."""
+    key = _key()
+    if not key or not corp_code:
+        return []
+    try:
+        r = requests.get(f"{BASE}/cvbdIsDecsn.json", params={
+            "crtfc_key": key, "corp_code": corp_code,
+            "bgn_de": bgn_de, "end_de": end_de,
+        }, timeout=30)
+        d = r.json()
+    except Exception:
+        return None
+    if d.get("status") == "013":
+        return []
+    if d.get("status") != "000":
+        return None
+    return d.get("list") or []
+
+
+def _piic_detail(item: dict):
+    """유상증자결정 한 건 -> {method(배정방식), raise_amount_won(조달금액), dilution_pct(희석률)}."""
+    raise_amt = sum((_num(item.get(k)) or 0) for k in
+                     ("fdpp_fclt", "fdpp_bsninh", "fdpp_op", "fdpp_dtrp", "fdpp_ocsa", "fdpp_etc"))
+    new_shares = (_num(item.get("nstk_ostk_cnt")) or 0) + (_num(item.get("nstk_estk_cnt")) or 0)
+    base_shares = (_num(item.get("bfic_tisstk_ostk")) or 0) + (_num(item.get("bfic_tisstk_estk")) or 0)
+    return {
+        "method": item.get("ic_mthn"),
+        "raise_amount_won": raise_amt or None,
+        "dilution_pct": round(new_shares / base_shares * 100, 1) if base_shares else None,
+    }
+
+
+def _cvbd_detail(item: dict):
+    """전환사채권발행결정 한 건 -> {method(발행방법), amount_won(권면총액)}."""
+    return {"method": item.get("bdis_mthn"), "amount_won": _num(item.get("bd_fta"))}
+
+
+def dilution_flags(corp_code: str, bgn_de: str, end_de: str):
+    """기간 내 유상증자/CB 상세. {"capital_increase": [...], "convertible_bond": [...]}.
+    둘 중 하나라도 조회 실패면 None(disclosures 참조)."""
+    ci = capital_increase_items(corp_code, bgn_de, end_de)
+    cb = cb_issue_items(corp_code, bgn_de, end_de)
+    if ci is None or cb is None:
+        return None
+    return {
+        "capital_increase": [_piic_detail(it) for it in ci],
+        "convertible_bond": [_cvbd_detail(it) for it in cb],
+    }
+
+
+def dilution_severity(flags: dict) -> float:
+    """배정방식·희석률 기반 감점폭. 제3자배정/일반공모 + 희석 10%↑ 는 강한 감점."""
+    penalty = 0.0
+    for ci in flags.get("capital_increase", []):
+        method = ci.get("method") or ""
+        dp = ci.get("dilution_pct") or 0
+        hard_method = ("제3자배정" in method) or ("일반공모" in method)
+        if hard_method and dp >= 10:
+            penalty -= 0.08
+        elif dp >= 10:
+            penalty -= 0.05
+        else:
+            penalty -= 0.02
+    for _cb in flags.get("convertible_bond", []):
+        penalty -= 0.05   # 시총 대비 비율 산출 어려움(권면총액만 제공) -> 기존 고정 감점 유지
+    return penalty
+
+
 if __name__ == "__main__":
     mp = load_corp_map()
     print("corp_map size:", len(mp))

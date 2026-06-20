@@ -28,7 +28,8 @@ try:
 except Exception:
     pass
 
-from .clients import naver, login, openapi
+from .clients import naver, login, openapi, news
+from .clients import macro as macro_client
 try:
     from .clients import dart
 except Exception:
@@ -222,44 +223,168 @@ def main():
             bonus += 0.04
         cur.loc[code, "score"] += bonus
 
-    # === 5-b) DART 성장성/안정성 가점 (pool 한정, 키 있을 때만) ===
+    # === 5-b) DART 성장성/안정성 가점 + 공시 필터 (pool ∪ 보유종목, 키 있을 때만) ===
+    # 공시는 보유종목도 포함해서 본다 — 신규 후보 거를 때뿐 아니라 "투자논리 깨짐" 경고용.
     fundamentals = {}
-    sectors = {}      # {종목코드: 업종버킷} — 부채 감점 면제 판정 + 출력용
+    sectors = {}          # {종목코드: 업종버킷} — 부채 감점 면제 판정 + 출력용
+    disclosure_map = {}   # {종목코드: {"hard_negative":[...], "soft_negative":[...], "positive":[...]}}
+    excluded = set()      # 강한 악재 공시(관리종목/상장폐지/횡령 등) -> 신규 후보만 제외, 보유종목은 경고로 유지
+    dart_codes = sorted(set(pool.index) | (HELD & set(cur.index)))
     if dart is not None:
         try:
             cmap = dart.load_corp_map()
         except Exception:
             cmap = {}
         try:
-            sectors = dart.sectors_for(list(pool.index), cmap)  # company.json, 캐시
+            sectors = dart.sectors_for(dart_codes, cmap)  # company.json, 캐시
         except Exception:
             sectors = {}
-        for code in pool.index:
+        disc_bgn = (datetime.datetime.strptime(today, "%Y%m%d")
+                    - datetime.timedelta(days=30)).strftime("%Y%m%d")
+        for code in dart_codes:
             cc = cmap.get(code) or cmap.get(dart.base_code(code))  # 우선주->본주
             if not cc:
                 continue
             _fy = now.year - 1                  # 최신 사업보고서(직전 회계연도), 미공시면 그 전년
             fin = dart.financials(cc, _fy) or dart.financials(cc, _fy - 1)
-            if not fin:
-                continue
-            fundamentals[code] = fin
             b = 0.0
-            if (fin.get("op_growth_pct") or 0) > 0:
-                b += 0.03
-            if (fin.get("rev_growth_pct") or 0) >= 10:
-                b += 0.02
-            if (fin.get("roe_pct") or 0) >= 8:
-                b += 0.03
-            dr = fin.get("debt_ratio_pct")
-            # 금융·보험은 구조적 고부채 -> 부채비율 감점 면제(업종 불리 교정)
-            if dr is not None and dr > 200 and not dart.is_financial(sectors.get(code)):
-                b -= 0.03
-            cur.loc[code, "score"] += b
+            if fin:
+                fundamentals[code] = fin
+                if (fin.get("op_growth_pct") or 0) > 0:
+                    b += 0.03
+                if (fin.get("rev_growth_pct") or 0) >= 10:
+                    b += 0.02
+                if (fin.get("roe_pct") or 0) >= 8:
+                    b += 0.03
+                dr = fin.get("debt_ratio_pct")
+                # 금융·보험은 구조적 고부채 -> 부채비율 감점 면제(업종 불리 교정)
+                if dr is not None and dr > 200 and not dart.is_financial(sectors.get(code)):
+                    b -= 0.03
+
+            try:
+                flags = dart.disclosure_flags(cc, disc_bgn, today)
+            except Exception:
+                flags = None
+            disclosure_map[code] = flags   # None = 조회 실패(모름). "공시 없음"과 절대 혼동 금지.
+            if flags is not None:
+                if flags["hard_negative"] and code not in HELD:
+                    excluded.add(code)
+                elif flags["soft_negative"]:
+                    has_ci = any("유상증자결정" in (it.get("report_nm") or "") for it in flags["soft_negative"])
+                    has_cb = any("전환사채권발행결정" in (it.get("report_nm") or "") for it in flags["soft_negative"])
+                    if has_ci or has_cb:
+                        try:
+                            dil = dart.dilution_flags(cc, disc_bgn, today)
+                        except Exception:
+                            dil = None
+                        if dil is not None:
+                            if dil["capital_increase"] or dil["convertible_bond"]:
+                                flags["dilution"] = dil
+                            b += dart.dilution_severity(dil)
+                        # dil 조회 실패면 감점 보류(모르는 걸 페널티로 단정 안 함)
+                    else:
+                        b -= 0.05  # 그 외 SOFT_NEGATIVE(교환사채 등)는 기존 고정 감점
+                if flags["positive"]:
+                    b += 0.02
+
+            if code in cur.index:
+                cur.loc[code, "score"] += b
+
+    if excluded:
+        cur = cur.drop(index=[c for c in excluded if c in cur.index])
+
+    # === 5-c) 뉴스 건수 (최근 7일, Google News RSS) — "재료 없는 변동성" 탐지용 ===
+    news_count_map = {}   # 실패(None)는 저장 안 함 -> "확인 안 됨"과 "0건 확인"을 구분
+    for code in dart_codes:
+        nm = cur.loc[code, "ISU_NM"] if code in cur.index and "ISU_NM" in cur.columns else None
+        if not nm or pd.isna(nm):
+            continue
+        try:
+            cnt = news.count_recent(str(nm), days=7)
+        except Exception:
+            cnt = None
+        if cnt is not None:
+            news_count_map[code] = cnt
+
+    enriched_codes = set(dart_codes)  # 공시/뉴스/펀더멘털 체크를 실제로 한 종목만 라벨링 대상
+    MOMENTUM_HIGH_PCT = 15  # 이 이상 모멘텀이면 "왜 오르는지" 라벨링 대상
+    NEWS_LOW_THRESHOLD = 2  # 최근 7일 기사 수 이하면 "뉴스로 설명 안 되는 변동" 신호
+
+    def _growth_good(code):
+        fin = fundamentals.get(code)
+        return bool(fin and ((fin.get("op_growth_pct") or -999) > 0
+                              or (fin.get("rev_growth_pct") or -999) >= 10))
+
+    def _momentum_label(code, mom_pct):
+        if mom_pct is None or mom_pct < MOMENTUM_HIGH_PCT:
+            return None
+        if code not in enriched_codes:
+            return None  # 공시/뉴스/실적 체크 자체를 안 한 종목 -> 모르면 라벨 안 닮(오탐 방지)
+        if _growth_good(code):
+            return "실적 동반 상승"
+        if (disclosure_map.get(code) or {}).get("positive"):
+            return "공시 모멘텀"
+        nc = news_count_map.get(code)
+        if nc is not None and nc <= NEWS_LOW_THRESHOLD:
+            return "원인 불명 변동성"
+        return "재료 미확인 상승"
+
+    def _thesis_status(code):
+        flags = disclosure_map.get(code)
+        if flags is None:
+            return "확인 불가"  # 공시 조회 자체가 안 됨(미체크/API실패) -> "양호"로 단정 금지
+        if flags.get("hard_negative"):
+            return "재검토 필요"
+        fin = fundamentals.get(code)
+        growth_bad = bool(fin and (fin.get("op_growth_pct") or 0) < 0 and (fin.get("rev_growth_pct") or 0) < 0)
+        if flags.get("soft_negative") or growth_bad:
+            return "주의"
+        return "양호"
+
+    # === 5-d) ETF/지수상품 보유 판단용 매크로 (개별종목 무관, 1회만 계산) ===
+    macro = {
+        "us10y": macro_client.us10y_trend(),
+        "usdkrw": macro_client.usdkrw_trend(),
+        "kospi": macro_client.kospi_trend(),
+        "foreign_netflow_7d_won": macro_client.foreign_netflow(session, days=7),
+    }
+
+    # === 5-e) KODEX 200(ETF) 보유 현황 — 개별주 유니버스엔 없음(ETF), 팩터 미적용
+    KODEX200_CODE = "069500"
+    kodex200_holding = None
+    if KODEX200_CODE in HELD:
+        try:
+            etf_cur = openapi.etf_daily(today)
+            etf_past = openapi.etf_daily(past_dd)
+            if KODEX200_CODE in etf_cur.index:
+                row = etf_cur.loc[KODEX200_CODE]
+                close = float(row["TDD_CLSPRC"])
+                mom_pct = None
+                if KODEX200_CODE in etf_past.index:
+                    past_close = float(etf_past.loc[KODEX200_CODE]["TDD_CLSPRC"])
+                    if past_close:
+                        mom_pct = round((close / past_close - 1) * 100, 2)
+                kodex200_holding = {
+                    "code": KODEX200_CODE,
+                    "name": row.get("ISU_NM"),
+                    "close": close,
+                    "nav": None if pd.isna(row.get("NAV")) else float(row["NAV"]),
+                    "fluc_rt": None if pd.isna(row.get("FLUC_RT")) else float(row["FLUC_RT"]),
+                    "momentum_pct": mom_pct,
+                    "note": "개별주 팩터(모멘텀/가치/유동성/사이즈) 미적용. macro 섹션으로 판단",
+                }
+        except openapi.KrxApiError:
+            kodex200_holding = None
 
     # === 6) 출력 ===
     final = cur.sort_values("score", ascending=False)
+    # 보유종목은 점수 순위와 무관하게 항상 포함(thesis 판단 노출 보장) + 비보유 상위 TOP_N
+    top_non_held = [c for c in final.index if c not in HELD][:TOP_N]
+    out_codes = sorted(set(top_non_held) | (HELD & set(final.index)),
+                        key=lambda c: -float(final.loc[c, "score"]))
     recs = []
-    for code, r in final.head(TOP_N + len(HELD)).iterrows():
+    for code in out_codes:
+        r = final.loc[code]
         recs.append({
             "code": code,
             "name": r.get("ISU_NM"),
@@ -290,6 +415,13 @@ def main():
                 "debt_ratio_pct": fundamentals[code].get("debt_ratio_pct"),
                 "year": fundamentals[code].get("year"),
             } if code in fundamentals else None),
+            "momentum_label": _momentum_label(
+                code, None if pd.isna(r["mom_pct"]) else float(r["mom_pct"])),
+            "disclosure": ({k: v for k, v in (disclosure_map.get(code) or {}).items() if v}
+                            or None),
+            "disclosure_checked": disclosure_map.get(code) is not None,
+            "thesis_status": (_thesis_status(code) if code in HELD else None),
+            "news_count_7d": news_count_map.get(code),
         })
 
     out = {
@@ -305,6 +437,12 @@ def main():
         ),
         "dart_factors": ("성장성/안정성 가점 적용(매출·영업익 성장률, ROE, 부채비율; 금융·보험은 부채 감점 면제)" if fundamentals else "없음"),
         "sector_source": ("DART 기업개황 induty_code(KSIC) 버킷" if sectors else "없음"),
+        "disclosure_source": ("OpenDART 공시검색 최근 30일 (강한 악재=신규후보 제외, 중간 악재=감점, 호재=가점)"
+                              if disclosure_map else "없음"),
+        "news_source": ("Google News RSS 종목명 검색, 최근 7일 기사 수" if news_count_map else "없음"),
+        "macro": macro,
+        "macro_note": "KODEX200 등 지수상품 보유 판단은 개별종목 공시/뉴스보다 이 매크로 지표(미국10년물·환율·코스피추세·외국인수급)가 더 설명력 있음",
+        "kodex200_holding": kodex200_holding,
         "disclaimer": "투자 자문 아님. 공개데이터 기반 단순 스크리닝. 투자 판단·손익 책임은 사용자.",
         "recommendations": recs,
     }
@@ -312,7 +450,12 @@ def main():
         json.dump(out, f, ensure_ascii=False, indent=2)
 
     print("저장 완료 -> kospi200_screen.json")
-    print(json.dumps(out, ensure_ascii=False, indent=2))
+    dump = json.dumps(out, ensure_ascii=False, indent=2)
+    try:
+        print(dump)
+    except UnicodeEncodeError:
+        # 콘솔 코드페이지(cp949 등)가 표현 못 하는 문자가 있어도 저장은 끝났으니 죽지 않게 처리.
+        print(dump.encode("ascii", errors="backslashreplace").decode("ascii"))
 
 
 if __name__ == "__main__":
