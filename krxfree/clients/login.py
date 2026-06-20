@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-KRX 로그인 + 내부 JSON API(getJsonData.cmd) 자체 클라이언트 — pykrx 비의존.
+KRX 로그인 + 내부 JSON API(getJsonData.cmd) 자체 클라이언트.
 
 - data.krx.co.kr 회원 로그인(JSESSIONID) 후, 사이트 내부 통계 API 호출.
 - PER/PBR/배당(MDCSTAT03501), 지수구성종목(MDCSTAT00601) 구현.

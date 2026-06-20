@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-자체 Naver OHLCV 클라이언트 — pykrx 비의존.
+자체 Naver OHLCV 클라이언트.
 
 Naver fchart 엔드포인트(count=기간형)를 직접 호출해 한 종목의 일봉 시계열을
-1콜로 받아 DataFrame 반환. pykrx get_market_ohlcv(start,end,code) 대체.
+1콜로 받아 DataFrame 반환.
 """
 import datetime
 import xml.etree.ElementTree as ET

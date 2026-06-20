@@ -3,9 +3,9 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pykrx-free"
+name = "krxbrief"
 version = "0.1.0"
-description = "KRX 모닝 브리핑 & 코스피200 스크리너 (pykrx 비의존)"
+description = "KRX 모닝 브리핑 & 코스피200 스크리너"
 requires-python = ">=3.9"
 dependencies = ["pandas", "numpy", "requests", "python-dotenv", "yfinance"]
 
