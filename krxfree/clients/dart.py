@@ -261,6 +261,57 @@ def per_pbr(fin: dict, close: float, shares: float):
     return per, pbr
 
 
+# ---------- 공시 필터 (Phase1: 호재/악재 키워드 분류) ----------
+# report_nm 부분일치. 강한 악재는 후보 제외급, 중간 악재는 감점, 호재는 소폭 가점.
+HARD_NEGATIVE_KW = ("감자결정", "관리종목지정", "상장폐지", "횡령", "배임", "회생절차")
+SOFT_NEGATIVE_KW = ("유상증자결정", "전환사채권발행결정", "신주인수권부사채권발행결정", "교환사채권발행결정")
+POSITIVE_KW = ("자기주식취득결정", "자기주식취득신탁계약체결결정", "단일판매공급계약체결")
+
+
+def classify_disclosure(report_nm: str):
+    """공시 제목 -> 'hard_negative'/'soft_negative'/'positive'/None."""
+    nm = report_nm or ""
+    for kw in HARD_NEGATIVE_KW:
+        if kw in nm:
+            return "hard_negative"
+    for kw in SOFT_NEGATIVE_KW:
+        if kw in nm:
+            return "soft_negative"
+    for kw in POSITIVE_KW:
+        if kw in nm:
+            return "positive"
+    return None
+
+
+def disclosures(corp_code: str, bgn_de: str, end_de: str):
+    """기간 내 공시 목록(list.json) 원본 리스트. 키 없거나 실패 시 []."""
+    key = _key()
+    if not key or not corp_code:
+        return []
+    try:
+        r = requests.get(f"{BASE}/list.json", params={
+            "crtfc_key": key, "corp_code": corp_code,
+            "bgn_de": bgn_de, "end_de": end_de, "page_count": 100,
+        }, timeout=30)
+        d = r.json()
+    except Exception:
+        return []
+    if d.get("status") not in ("000", "013"):  # 013 = 조회된 데이터 없음
+        return []
+    return d.get("list") or []
+
+
+def disclosure_flags(corp_code: str, bgn_de: str, end_de: str):
+    """기간 내 공시를 분류해 {"hard_negative": [...], "soft_negative": [...], "positive": [...]} 반환.
+    각 항목은 {"report_nm", "rcept_dt"}. 해당 없는 카테고리는 빈 리스트."""
+    out = {"hard_negative": [], "soft_negative": [], "positive": []}
+    for it in disclosures(corp_code, bgn_de, end_de):
+        cat = classify_disclosure(it.get("report_nm") or "")
+        if cat:
+            out[cat].append({"report_nm": it.get("report_nm"), "rcept_dt": it.get("rcept_dt")})
+    return out
+
+
 if __name__ == "__main__":
     mp = load_corp_map()
     print("corp_map size:", len(mp))

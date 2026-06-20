@@ -222,39 +222,87 @@ def main():
             bonus += 0.04
         cur.loc[code, "score"] += bonus
 
-    # === 5-b) DART 성장성/안정성 가점 (pool 한정, 키 있을 때만) ===
+    # === 5-b) DART 성장성/안정성 가점 + 공시 필터 (pool ∪ 보유종목, 키 있을 때만) ===
+    # 공시는 보유종목도 포함해서 본다 — 신규 후보 거를 때뿐 아니라 "투자논리 깨짐" 경고용.
     fundamentals = {}
-    sectors = {}      # {종목코드: 업종버킷} — 부채 감점 면제 판정 + 출력용
+    sectors = {}          # {종목코드: 업종버킷} — 부채 감점 면제 판정 + 출력용
+    disclosure_map = {}   # {종목코드: {"hard_negative":[...], "soft_negative":[...], "positive":[...]}}
+    excluded = set()      # 강한 악재 공시(관리종목/상장폐지/횡령 등) -> 신규 후보만 제외, 보유종목은 경고로 유지
+    dart_codes = sorted(set(pool.index) | (HELD & set(cur.index)))
     if dart is not None:
         try:
             cmap = dart.load_corp_map()
         except Exception:
             cmap = {}
         try:
-            sectors = dart.sectors_for(list(pool.index), cmap)  # company.json, 캐시
+            sectors = dart.sectors_for(dart_codes, cmap)  # company.json, 캐시
         except Exception:
             sectors = {}
-        for code in pool.index:
+        disc_bgn = (datetime.datetime.strptime(today, "%Y%m%d")
+                    - datetime.timedelta(days=30)).strftime("%Y%m%d")
+        for code in dart_codes:
             cc = cmap.get(code) or cmap.get(dart.base_code(code))  # 우선주->본주
             if not cc:
                 continue
             _fy = now.year - 1                  # 최신 사업보고서(직전 회계연도), 미공시면 그 전년
             fin = dart.financials(cc, _fy) or dart.financials(cc, _fy - 1)
-            if not fin:
-                continue
-            fundamentals[code] = fin
             b = 0.0
-            if (fin.get("op_growth_pct") or 0) > 0:
-                b += 0.03
-            if (fin.get("rev_growth_pct") or 0) >= 10:
+            if fin:
+                fundamentals[code] = fin
+                if (fin.get("op_growth_pct") or 0) > 0:
+                    b += 0.03
+                if (fin.get("rev_growth_pct") or 0) >= 10:
+                    b += 0.02
+                if (fin.get("roe_pct") or 0) >= 8:
+                    b += 0.03
+                dr = fin.get("debt_ratio_pct")
+                # 금융·보험은 구조적 고부채 -> 부채비율 감점 면제(업종 불리 교정)
+                if dr is not None and dr > 200 and not dart.is_financial(sectors.get(code)):
+                    b -= 0.03
+
+            try:
+                flags = dart.disclosure_flags(cc, disc_bgn, today)
+            except Exception:
+                flags = {"hard_negative": [], "soft_negative": [], "positive": []}
+            disclosure_map[code] = flags
+            if flags["hard_negative"] and code not in HELD:
+                excluded.add(code)
+            elif flags["soft_negative"]:
+                b -= 0.05
+            if flags["positive"]:
                 b += 0.02
-            if (fin.get("roe_pct") or 0) >= 8:
-                b += 0.03
-            dr = fin.get("debt_ratio_pct")
-            # 금융·보험은 구조적 고부채 -> 부채비율 감점 면제(업종 불리 교정)
-            if dr is not None and dr > 200 and not dart.is_financial(sectors.get(code)):
-                b -= 0.03
-            cur.loc[code, "score"] += b
+
+            if code in cur.index:
+                cur.loc[code, "score"] += b
+
+    if excluded:
+        cur = cur.drop(index=[c for c in excluded if c in cur.index])
+
+    MOMENTUM_HIGH_PCT = 15  # 이 이상 모멘텀이면 "왜 오르는지" 라벨링 대상
+
+    def _growth_good(code):
+        fin = fundamentals.get(code)
+        return bool(fin and ((fin.get("op_growth_pct") or -999) > 0
+                              or (fin.get("rev_growth_pct") or -999) >= 10))
+
+    def _momentum_label(code, mom_pct):
+        if mom_pct is None or mom_pct < MOMENTUM_HIGH_PCT:
+            return None
+        if _growth_good(code):
+            return "실적 동반 상승"
+        if disclosure_map.get(code, {}).get("positive"):
+            return "공시 모멘텀"
+        return "재료 미확인 상승"
+
+    def _thesis_status(code):
+        flags = disclosure_map.get(code, {})
+        if flags.get("hard_negative"):
+            return "재검토 필요"
+        fin = fundamentals.get(code)
+        growth_bad = bool(fin and (fin.get("op_growth_pct") or 0) < 0 and (fin.get("rev_growth_pct") or 0) < 0)
+        if flags.get("soft_negative") or growth_bad:
+            return "주의"
+        return "양호"
 
     # === 6) 출력 ===
     final = cur.sort_values("score", ascending=False)
@@ -290,6 +338,11 @@ def main():
                 "debt_ratio_pct": fundamentals[code].get("debt_ratio_pct"),
                 "year": fundamentals[code].get("year"),
             } if code in fundamentals else None),
+            "momentum_label": _momentum_label(
+                code, None if pd.isna(r["mom_pct"]) else float(r["mom_pct"])),
+            "disclosure": ({k: v for k, v in disclosure_map.get(code, {}).items() if v}
+                            or None),
+            "thesis_status": (_thesis_status(code) if code in HELD else None),
         })
 
     out = {
@@ -305,6 +358,8 @@ def main():
         ),
         "dart_factors": ("성장성/안정성 가점 적용(매출·영업익 성장률, ROE, 부채비율; 금융·보험은 부채 감점 면제)" if fundamentals else "없음"),
         "sector_source": ("DART 기업개황 induty_code(KSIC) 버킷" if sectors else "없음"),
+        "disclosure_source": ("OpenDART 공시검색 최근 30일 (강한 악재=신규후보 제외, 중간 악재=감점, 호재=가점)"
+                              if disclosure_map else "없음"),
         "disclaimer": "투자 자문 아님. 공개데이터 기반 단순 스크리닝. 투자 판단·손익 책임은 사용자.",
         "recommendations": recs,
     }
