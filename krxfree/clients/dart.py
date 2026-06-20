@@ -312,6 +312,87 @@ def disclosure_flags(corp_code: str, bgn_de: str, end_de: str):
     return out
 
 
+# ---------- 유상증자/CB 상세 (Phase2: 배정방식 + 희석규모로 감점폭 세분화) ----------
+def capital_increase_items(corp_code: str, bgn_de: str, end_de: str):
+    """유상증자결정(piicDecsn) 상세 목록. 키 없거나 실패 시 []."""
+    key = _key()
+    if not key or not corp_code:
+        return []
+    try:
+        r = requests.get(f"{BASE}/piicDecsn.json", params={
+            "crtfc_key": key, "corp_code": corp_code,
+            "bgn_de": bgn_de, "end_de": end_de,
+        }, timeout=30)
+        d = r.json()
+    except Exception:
+        return []
+    if d.get("status") not in ("000", "013"):
+        return []
+    return d.get("list") or []
+
+
+def cb_issue_items(corp_code: str, bgn_de: str, end_de: str):
+    """전환사채권발행결정(cvbdIsDecsn) 상세 목록. 키 없거나 실패 시 []."""
+    key = _key()
+    if not key or not corp_code:
+        return []
+    try:
+        r = requests.get(f"{BASE}/cvbdIsDecsn.json", params={
+            "crtfc_key": key, "corp_code": corp_code,
+            "bgn_de": bgn_de, "end_de": end_de,
+        }, timeout=30)
+        d = r.json()
+    except Exception:
+        return []
+    if d.get("status") not in ("000", "013"):
+        return []
+    return d.get("list") or []
+
+
+def _piic_detail(item: dict):
+    """유상증자결정 한 건 -> {method(배정방식), raise_amount_won(조달금액), dilution_pct(희석률)}."""
+    raise_amt = sum((_num(item.get(k)) or 0) for k in
+                     ("fdpp_fclt", "fdpp_bsninh", "fdpp_op", "fdpp_dtrp", "fdpp_ocsa", "fdpp_etc"))
+    new_shares = (_num(item.get("nstk_ostk_cnt")) or 0) + (_num(item.get("nstk_estk_cnt")) or 0)
+    base_shares = (_num(item.get("bfic_tisstk_ostk")) or 0) + (_num(item.get("bfic_tisstk_estk")) or 0)
+    return {
+        "method": item.get("ic_mthn"),
+        "raise_amount_won": raise_amt or None,
+        "dilution_pct": round(new_shares / base_shares * 100, 1) if base_shares else None,
+    }
+
+
+def _cvbd_detail(item: dict):
+    """전환사채권발행결정 한 건 -> {method(발행방법), amount_won(권면총액)}."""
+    return {"method": item.get("bdis_mthn"), "amount_won": _num(item.get("bd_fta"))}
+
+
+def dilution_flags(corp_code: str, bgn_de: str, end_de: str):
+    """기간 내 유상증자/CB 상세. {"capital_increase": [...], "convertible_bond": [...]}."""
+    return {
+        "capital_increase": [_piic_detail(it) for it in capital_increase_items(corp_code, bgn_de, end_de)],
+        "convertible_bond": [_cvbd_detail(it) for it in cb_issue_items(corp_code, bgn_de, end_de)],
+    }
+
+
+def dilution_severity(flags: dict) -> float:
+    """배정방식·희석률 기반 감점폭. 제3자배정/일반공모 + 희석 10%↑ 는 강한 감점."""
+    penalty = 0.0
+    for ci in flags.get("capital_increase", []):
+        method = ci.get("method") or ""
+        dp = ci.get("dilution_pct") or 0
+        hard_method = ("제3자배정" in method) or ("일반공모" in method)
+        if hard_method and dp >= 10:
+            penalty -= 0.08
+        elif dp >= 10:
+            penalty -= 0.05
+        else:
+            penalty -= 0.02
+    for _cb in flags.get("convertible_bond", []):
+        penalty -= 0.05   # 시총 대비 비율 산출 어려움(권면총액만 제공) -> 기존 고정 감점 유지
+    return penalty
+
+
 if __name__ == "__main__":
     mp = load_corp_map()
     print("corp_map size:", len(mp))

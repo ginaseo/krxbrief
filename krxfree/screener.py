@@ -268,7 +268,18 @@ def main():
             if flags["hard_negative"] and code not in HELD:
                 excluded.add(code)
             elif flags["soft_negative"]:
-                b -= 0.05
+                has_ci = any("유상증자결정" in (it.get("report_nm") or "") for it in flags["soft_negative"])
+                has_cb = any("전환사채권발행결정" in (it.get("report_nm") or "") for it in flags["soft_negative"])
+                if has_ci or has_cb:
+                    try:
+                        dil = dart.dilution_flags(cc, disc_bgn, today)
+                    except Exception:
+                        dil = {"capital_increase": [], "convertible_bond": []}
+                    if dil["capital_increase"] or dil["convertible_bond"]:
+                        flags["dilution"] = dil
+                    b += dart.dilution_severity(dil)
+                else:
+                    b -= 0.05  # 그 외 SOFT_NEGATIVE(교환사채 등)는 기존 고정 감점
             if flags["positive"]:
                 b += 0.02
 
