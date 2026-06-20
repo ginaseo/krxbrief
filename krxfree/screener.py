@@ -28,7 +28,7 @@ try:
 except Exception:
     pass
 
-from .clients import naver, login, openapi
+from .clients import naver, login, openapi, news
 try:
     from .clients import dart
 except Exception:
@@ -289,7 +289,19 @@ def main():
     if excluded:
         cur = cur.drop(index=[c for c in excluded if c in cur.index])
 
+    # === 5-c) 뉴스 건수 (최근 7일, Google News RSS) — "재료 없는 변동성" 탐지용 ===
+    news_count_map = {}
+    for code in dart_codes:
+        nm = cur.loc[code, "ISU_NM"] if code in cur.index and "ISU_NM" in cur.columns else None
+        if not nm or pd.isna(nm):
+            continue
+        try:
+            news_count_map[code] = news.count_recent(str(nm), days=7)
+        except Exception:
+            continue
+
     MOMENTUM_HIGH_PCT = 15  # 이 이상 모멘텀이면 "왜 오르는지" 라벨링 대상
+    NEWS_LOW_THRESHOLD = 2  # 최근 7일 기사 수 이하면 "뉴스로 설명 안 되는 변동" 신호
 
     def _growth_good(code):
         fin = fundamentals.get(code)
@@ -303,6 +315,8 @@ def main():
             return "실적 동반 상승"
         if disclosure_map.get(code, {}).get("positive"):
             return "공시 모멘텀"
+        if news_count_map.get(code, 0) <= NEWS_LOW_THRESHOLD:
+            return "원인 불명 변동성"
         return "재료 미확인 상승"
 
     def _thesis_status(code):
@@ -354,6 +368,7 @@ def main():
             "disclosure": ({k: v for k, v in disclosure_map.get(code, {}).items() if v}
                             or None),
             "thesis_status": (_thesis_status(code) if code in HELD else None),
+            "news_count_7d": news_count_map.get(code),
         })
 
     out = {
@@ -371,6 +386,7 @@ def main():
         "sector_source": ("DART 기업개황 induty_code(KSIC) 버킷" if sectors else "없음"),
         "disclosure_source": ("OpenDART 공시검색 최근 30일 (강한 악재=신규후보 제외, 중간 악재=감점, 호재=가점)"
                               if disclosure_map else "없음"),
+        "news_source": ("Google News RSS 종목명 검색, 최근 7일 기사 수" if news_count_map else "없음"),
         "disclaimer": "투자 자문 아님. 공개데이터 기반 단순 스크리닝. 투자 판단·손익 책임은 사용자.",
         "recommendations": recs,
     }
