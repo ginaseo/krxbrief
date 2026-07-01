@@ -36,6 +36,7 @@ except Exception:
     dart = None
 from .loaders import load_members, load_held
 from .paths import RESULTS_DIR
+from . import state as briefing_state
 
 OUT_DIR = RESULTS_DIR
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -267,6 +268,15 @@ def main():
                 flags = None
             disclosure_map[code] = flags   # None = 조회 실패(모름). "공시 없음"과 절대 혼동 금지.
             if flags is not None:
+                if flags["hard_negative"]:
+                    if any(dart.UNFAITHFUL_KW in (it.get("report_nm") or "")
+                           for it in flags["hard_negative"]):
+                        hist_bgn = (datetime.datetime.strptime(today, "%Y%m%d")
+                                    - datetime.timedelta(days=365 * 5)).strftime("%Y%m%d")
+                        try:
+                            flags["unfaithful_repeat_5y"] = dart.unfaithful_repeat_count(cc, hist_bgn, today)
+                        except Exception:
+                            flags["unfaithful_repeat_5y"] = None
                 if flags["hard_negative"] and code not in HELD:
                     excluded.add(code)
                 elif flags["soft_negative"]:
@@ -296,6 +306,26 @@ def main():
 
     if excluded:
         cur = cur.drop(index=[c for c in excluded if c in cur.index])
+
+    # === 5-b') 공시 이력 비교 — "어제 대비 무엇이 달라졌는지"(신규/후속 공시 판정) ===
+    prev_state = briefing_state.load()
+    prev_disclosures = prev_state.get("disclosures") or {}
+    new_disclosures_state = {}
+    for code, flags in disclosure_map.items():
+        if not flags:
+            continue
+        items = flags.get("hard_negative", []) + flags.get("soft_negative", []) + flags.get("positive", [])
+        if not items:
+            continue
+        last_seen = (prev_disclosures.get(code) or {}).get("last_rcept_no") or ""
+        latest = max(items, key=lambda it: it.get("rcept_no") or "")
+        for it in items:
+            it["new"] = (it.get("rcept_no") or "") > last_seen
+        new_disclosures_state[code] = {
+            "last_rcept_no": latest.get("rcept_no"),
+            "last_type": latest.get("report_nm"),
+        }
+    briefing_state.save({**prev_state, "disclosures": {**prev_disclosures, **new_disclosures_state}})
 
     # === 5-c) 뉴스 건수 (최근 7일, Google News RSS) — "재료 없는 변동성" 탐지용 ===
     news_count_map = {}   # 실패(None)는 저장 안 함 -> "확인 안 됨"과 "0건 확인"을 구분
@@ -345,6 +375,31 @@ def main():
             return "주의"
         return "양호"
 
+    _THESIS_DAMAGE_KW = ("횡령", "배임", "상장폐지", "관리종목지정", "회생절차")
+
+    def _thesis_direction(code):
+        """투자 Thesis 방향(강화/유지/약화/훼손). 공시 영향 점수와 별개로 방향성만 표시."""
+        flags = disclosure_map.get(code)
+        if flags is None:
+            return "확인 불가"
+        hard = flags.get("hard_negative") or []
+        if any(kw in (it.get("report_nm") or "") for it in hard for kw in _THESIS_DAMAGE_KW):
+            return "훼손"
+        if hard or flags.get("soft_negative"):
+            return "약화"
+        if flags.get("positive"):
+            return "강화"
+        return "유지"
+
+    def _action_needed(code, direction):
+        """행동 변화 감지 문구. 강화/유지/확인불가는 행동 변화 없음(None)."""
+        if direction == "훼손":
+            return "투자 논리 재검토 필요"
+        if direction == "약화":
+            flags = disclosure_map.get(code) or {}
+            return "자금 사용 목적 확인" if flags.get("dilution") else "후속 공시 확인 필요"
+        return None
+
     # === 5-d) ETF/지수상품 보유 판단용 매크로 (개별종목 무관, 1회만 계산) ===
     macro = {
         "us10y": macro_client.us10y_trend(),
@@ -386,6 +441,15 @@ def main():
     top_non_held = [c for c in final.index if c not in HELD][:TOP_N]
     out_codes = sorted(set(top_non_held) | (HELD & set(final.index)),
                         key=lambda c: -float(final.loc[c, "score"]))
+    def _disclosure_out(code):
+        """disclosure_map[code] -> 출력용 dict. 빈 리스트는 제거하되 unfaithful_repeat_5y=0은 보존
+        (0도 유의미한 값 - "이번 건 제외 과거 반복 없음"). 아무 내용 없으면 None."""
+        d = disclosure_map.get(code) or {}
+        out = {k: v for k, v in d.items() if k != "unfaithful_repeat_5y" and v}
+        if d.get("unfaithful_repeat_5y") is not None:
+            out["unfaithful_repeat_5y"] = d["unfaithful_repeat_5y"]
+        return out or None
+
     recs = []
     for code in out_codes:
         r = final.loc[code]
@@ -421,10 +485,11 @@ def main():
             } if code in fundamentals else None),
             "momentum_label": _momentum_label(
                 code, None if pd.isna(r["mom_pct"]) else float(r["mom_pct"])),
-            "disclosure": ({k: v for k, v in (disclosure_map.get(code) or {}).items() if v}
-                            or None),
+            "disclosure": _disclosure_out(code),
             "disclosure_checked": disclosure_map.get(code) is not None,
             "thesis_status": (_thesis_status(code) if code in HELD else None),
+            "thesis_direction": (_thesis_direction(code) if code in HELD else None),
+            "action_needed": (_action_needed(code, _thesis_direction(code)) if code in HELD else None),
             "news_count_7d": news_count_map.get(code),
         })
 

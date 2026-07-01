@@ -266,6 +266,33 @@ def per_pbr(fin: dict, close: float, shares: float):
 HARD_NEGATIVE_KW = ("감자결정", "관리종목지정", "상장폐지", "횡령", "배임", "회생절차", "불성실공시법인지정")
 SOFT_NEGATIVE_KW = ("유상증자결정", "전환사채권발행결정", "신주인수권부사채권발행결정", "교환사채권발행결정")
 POSITIVE_KW = ("자기주식취득결정", "자기주식취득신탁계약체결결정", "단일판매공급계약체결")
+UNFAITHFUL_KW = "불성실공시법인지정"   # 지정 사유·벌점은 OpenDART 구조화 API에 없음 -> 원문 링크로 대체(dart_link)
+
+
+def dart_link(rcept_no: str):
+    """공시 원문 뷰어 링크. rcept_no 없으면 None."""
+    return f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}" if rcept_no else None
+
+
+def disclosure_score(cat: str, report_nm: str):
+    """★ 공시 영향 점수(1~5)와 한 줄 사유. 내부 참고용, 매수·매도 신호 아님.
+
+    ponytail: 제목 키워드 기반 근사치(희석률 등 세부 수치는 반영 안 함).
+    분류 자체가 없으면 (None, None)."""
+    nm = report_nm or ""
+    if cat == "hard_negative":
+        if "불성실공시법인지정" in nm:
+            return 1, "공시 신뢰도 저하"
+        if "횡령" in nm or "배임" in nm:
+            return 1, "지배구조 리스크"
+        return 1, "상장 적격성 우려"
+    if cat == "soft_negative":
+        return 2, "희석 또는 재무구조 변화 가능성"
+    if cat == "positive":
+        if "자기주식" in nm:
+            return 5, "주주환원 확대"
+        return 4, "매출·실적 성장 가능성"
+    return None, None
 
 
 def classify_disclosure(report_nm: str):
@@ -310,7 +337,7 @@ def disclosures(corp_code: str, bgn_de: str, end_de: str):
 
 def disclosure_flags(corp_code: str, bgn_de: str, end_de: str):
     """기간 내 공시를 분류해 {"hard_negative": [...], "soft_negative": [...], "positive": [...]} 반환.
-    각 항목은 {"report_nm", "rcept_dt"}. 조회 자체가 실패하면 **None**(disclosures 참조)."""
+    각 항목은 {"report_nm", "rcept_dt", "rcept_no", "dart_link"}. 조회 자체가 실패하면 **None**(disclosures 참조)."""
     items = disclosures(corp_code, bgn_de, end_de)
     if items is None:
         return None
@@ -318,8 +345,51 @@ def disclosure_flags(corp_code: str, bgn_de: str, end_de: str):
     for it in items:
         cat = classify_disclosure(it.get("report_nm") or "")
         if cat:
-            out[cat].append({"report_nm": it.get("report_nm"), "rcept_dt": it.get("rcept_dt")})
+            rcept_no = it.get("rcept_no")
+            stars, reason = disclosure_score(cat, it.get("report_nm"))
+            out[cat].append({
+                "report_nm": it.get("report_nm"),
+                "rcept_dt": it.get("rcept_dt"),
+                "rcept_no": rcept_no,
+                "dart_link": dart_link(rcept_no),
+                "stars": stars,
+                "reason": reason,
+            })
     return out
+
+
+def unfaithful_repeat_count(corp_code: str, bgn_de: str, end_de: str, max_pages: int = 30):
+    """기간 내 '불성실공시법인지정' 등장 횟수(페이지네이션 처리).
+
+    [주의] 지정 사유·벌점은 OpenDART에 구조화 필드가 없어 여기서 산출하지 않는다
+    (document.xml 원문 자유텍스트뿐 -> 회사마다 포맷 달라 파싱 신뢰도 낮음. 원문 링크로 대체).
+    조회 자체가 실패하면 None(모름), 정상 조회인데 0건이면 0(이번 건 제외한 과거 반복 없음)."""
+    key = _key()
+    if not key or not corp_code:
+        return None
+    count = 0
+    page = 1
+    while page <= max_pages:
+        try:
+            r = requests.get(f"{BASE}/list.json", params={
+                "crtfc_key": key, "corp_code": corp_code,
+                "bgn_de": bgn_de, "end_de": end_de,
+                "page_no": page, "page_count": 100,
+            }, timeout=30)
+            d = r.json()
+        except Exception:
+            return None
+        if d.get("status") == "013":
+            break
+        if d.get("status") != "000":
+            return None
+        items = d.get("list") or []
+        count += sum(1 for it in items if UNFAITHFUL_KW in (it.get("report_nm") or ""))
+        total_page = int(d.get("total_page") or 1)
+        if page >= total_page:
+            break
+        page += 1
+    return count
 
 
 # ---------- 유상증자/CB 상세 (Phase2: 배정방식 + 희석규모로 감점폭 세분화) ----------

@@ -132,6 +132,13 @@
 
 **변경 이유**: 사용자가 "점수보다 왜 그 점수인지가 중요"하다고 판단. 라벨/경고를 점수와 분리해 설명가능성을 높이고, 추측성 분류(예: 단일판매계약 금액 추정)는 검증 안 된 API 필드를 쓰지 않는 [데이터 원칙](#데이터-원칙-사실-기반)을 그대로 따름.
 
+### Phase4 — 공시 영향 점수·Thesis 방향·이력 관리 (2026-07-01)
+- **KRX 시장조치 별도 API 없음 확인**: 공식 OpenAPI 는 시세·지수만 제공(기존 결정 재확인). 불성실공시법인지정 등도 DART `list.json` 제목 키워드 하나로만 잡힘 — "①DART 공시 ②KRX 시장조치 분리 API" 전제는 데이터소스상 불가. 라벨만 구분해 표기하는 수준이 현실적 한계.
+- `dart.disclosure_score(cat, report_nm)`: 공시 분류(hard/soft/positive)에 제목 키워드 기반 ★1~5 점수 + 한 줄 사유 부여. **내부 참고용, 매수·매도 신호 아님**. 희석률 등 세부 수치는 반영 안 함(ponytail: 근사치, 정밀화는 필요시 추가).
+- `_thesis_direction(code)`: 보유종목 한정, 4단계(강화/유지/약화/훼손). 횡령·배임·상장폐지·관리종목지정·회생절차는 훼손, 그 외 hard_negative(불성실공시 등)·soft_negative(유상증자/CB)는 약화, positive 만 있으면 강화, 없으면 유지. 조회 실패는 "확인 불가"(기존 `thesis_status`와 별개 필드로 병존 — 기존 소비처 안 깨기 위함).
+- `_action_needed(code, direction)`: 행동 변화 감지 문구. 훼손="투자 논리 재검토 필요", 약화="자금 사용 목적 확인"(희석 상세 있을 때) 또는 "후속 공시 확인 필요". 강화/유지/확인불가는 None(행동 변화 없음).
+- `results/briefing_state.json`: "어제 대비 무엇이 달라졌는지" 비교용 상태 파일. `{generated, disclosures: {종목코드: {last_rcept_no, last_type}}, thesis: {}, behavior: {}}`. 이번 구현은 `disclosures` 만 채움 — 같은 공시를 매일 반복 강조하지 않기 위해 각 공시 항목에 `new`(`rcept_no` > 저장된 `last_rcept_no`) 표시. `thesis`/`behavior` 는 스키마만 마련(향후 Thesis 변화·행동 변화 이력도 같은 파일에서 비교 확장 예정, 지금은 값 채우지 않음).
+
 ---
 
 ## 한계 / 확장 여지
