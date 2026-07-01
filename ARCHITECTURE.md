@@ -16,16 +16,18 @@ Thesis Engine         (krxfree/screener.py — 보유종목 today/rolling_30d/ro
         ↓
 Knowledge Engine       (krxfree/processors/* → knowledge/company/{code}/*.json)
         ↓
+Search Layer           (krxfree/search/* — Knowledge 를 검색하는 공통 API, 지금은 키워드 검색)
+        ↓
 Portfolio Intelligence Engine   ← 예정(Phase2.5, 미구현)
         ↓
-Briefing Generator             ← 예정(Phase3, 미구현 — 지금은 AI가 JSON을 직접 읽어 브리핑 작성)
+Briefing Generator             ← 예정(Phase3.5, 미구현 — 지금은 AI가 JSON을 직접 읽어 브리핑 작성)
         ↓
 Slack / Web / Mobile           ← 예정(미구현)
 ```
 
-**지금 실제로 도는 것은 위쪽 3단(Collection → Thesis → Knowledge)까지다.** Portfolio Intelligence
-이후는 로드맵이고 아직 코드가 없다 — 이 문서에서 "예정"이라고 명시한 부분은 존재하지 않는 것으로
-간주할 것.
+**지금 실제로 도는 것은 위쪽 4단(Collection → Thesis → Knowledge → Search)까지다.** Portfolio
+Intelligence 이후는 로드맵이고 아직 코드가 없다 — 이 문서에서 "예정"이라고 명시한 부분은 존재하지
+않는 것으로 간주할 것.
 
 ---
 
@@ -107,11 +109,31 @@ def process(code): ...
 뉴스·매크로 데이터가 갖춰지면 "Context Builder"(Knowledge + News + Macro + Tags → 브리핑
 생성 시점에 조합)로 별도 설계 예정.
 
-### 4. Portfolio Intelligence Engine — 예정(Phase2.5)
+### 4. Search Layer (`krxfree/search/`)
+Knowledge(`knowledge/company/*/merged.json`)를 검색하는 공통 API.
+
+```
+SearchEngine
+    ↓
+KeywordSearchBackend (현재 유일 구현)
+    ↓ (교체 대상, 아직 없음)
+EmbeddingSearchBackend / HybridSearchBackend
+```
+
+- `index.py`: merged.json 에서 검색 가치 있는 텍스트만 Chunk 화(Timeline Digest 한 기간 = 1
+  chunk, Investment Case 한 건 = 1 chunk). Raw JSON 전체를 인덱싱하지 않음.
+- `backends/keyword_backend.py`: 부분일치 스코어링 + `company_code`/`chunk_type`/
+  `thesis_state`/`tag`/`date_from`/`date_to` 메타데이터 필터.
+- **임베딩/벡터DB(Chroma·FAISS 등)는 의도적으로 미도입** — 지금 코퍼스 규모(종목 수십·Chunk
+  수백 이내)에서는 과설계(YAGNI). `docs/DESIGN.md` Phase3 에 재검토 조건(종목 100개↑, Chunk
+  10,000개↑, 자연어 질의응답 필요, Keyword Search 한계 확인, 임베딩 API 확보 중 하나) 명시.
+  조건이 차면 `default_engine()` 의 백엔드만 바꾸면 되고, `SearchEngine` 호출부는 안 바뀐다.
+
+### 5. Portfolio Intelligence Engine — 예정(Phase2.5)
 보유종목 개별이 아니라 포트폴리오 전체(업종 집중도·ETF/현금 비중·Correlation·Diversification)를
 분석. 아직 미구현.
 
-### 5. Briefing Generator — 예정(Phase3)
+### 6. Briefing Generator — 예정(Phase3.5)
 `results/*.json` + `knowledge/company/*/merged.json` + (향후) Portfolio Intelligence 결과를
 LLM 이 함께 읽어 최종 브리핑 문장을 생성. 지금은 이 역할을 AI(Claude 등)가 JSON 을 직접
 읽어 대체 수행 중(README.md 프롬프트 예시 참조).
