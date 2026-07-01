@@ -17,7 +17,7 @@ import sys
 import json
 import datetime
 
-from ..paths import company_knowledge_path
+from . import knowledge_io
 from .registry import register
 from .tags import match_tags
 
@@ -34,21 +34,13 @@ def _status_from_score(score):
     return "BROKEN"
 
 
-def _load(code, name):
-    p = company_knowledge_path(code, name)
-    try:
-        with open(p, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
 def _compute_case(cdef, timeline, today):
     name = cdef.get("name")
     keywords = cdef.get("keywords") or []
     importance = cdef.get("importance", 50)
+    # 구분자 없이 이어붙이면 두 필드 경계에서 키워드가 우연히 생겨 오탐될 수 있음 -> "\n" 로 분리.
     matched = [e for e in timeline
-               if any(kw in ((e.get("reason") or "") + (e.get("report_nm") or "")) for kw in keywords)]
+               if any(kw in ((e.get("reason") or "") + "\n" + (e.get("report_nm") or "")) for kw in keywords)]
     if not matched:
         return {"name": name, "status": "MAINTAINED", "importance": importance, "trend": "FLAT",
                 "reason": None, "last_updated": None, "case_status": "ACTIVE",
@@ -78,9 +70,11 @@ def _compute_case(cdef, timeline, today):
 @register("investment_case")
 def process(code):
     """manual.json 에 investment_cases(name/keywords/importance) 정의가 없으면 빈 리스트 반환
-    (임의로 테마를 만들지 않음). merged.json 의 investment_cases 를 갱신해 저장."""
-    manual = _load(code, "manual.json")
-    merged = _load(code, "merged.json")
+    (임의로 테마를 만들지 않음). merged.json 의 investment_cases 를 갱신해 저장.
+    merged.json 이 있는데 파싱 실패하면 knowledge_io.load 가 예외를 던진다 — 빈 값으로
+    덮어써 knowledge_merge_processor 가 채운 timeline/digest 등을 지우지 않기 위함."""
+    manual = knowledge_io.load(code, "manual.json")
+    merged = knowledge_io.load(code, "merged.json")
     case_defs = manual.get("investment_cases") or []
     timeline = merged.get("timeline", [])
     today = datetime.datetime.now()
@@ -90,10 +84,7 @@ def process(code):
     merged["investment_cases"] = out
     # 회사 단위 태그 = 모든 case 태그의 합집합. Context Builder(보류) 의 입력값 준비 단계.
     merged["tags"] = sorted({t for c in out for t in c.get("tags", [])})
-    merged["last_updated"] = datetime.datetime.now().isoformat(timespec="seconds")
-    p = company_knowledge_path(code, "merged.json")
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(merged, f, ensure_ascii=False, indent=2)
+    knowledge_io.save(code, "merged.json", merged)
     return out
 
 

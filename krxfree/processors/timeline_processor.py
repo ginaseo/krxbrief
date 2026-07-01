@@ -10,10 +10,11 @@
 """
 import sys
 import json
-import datetime
 
-from ..paths import company_knowledge_path
+from . import knowledge_io
 from .registry import register
+
+_DEFAULT = {"timeline": [], "investment_cases": [], "version": "1.0"}
 
 
 def _event_key(ev):
@@ -22,28 +23,13 @@ def _event_key(ev):
                                    ev.get("reason"))
 
 
-def _load(code):
-    p = company_knowledge_path(code, "generated.json")
-    try:
-        with open(p, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {"timeline": [], "investment_cases": [], "version": "1.0"}
-
-
-def _save(code, data):
-    data["last_updated"] = datetime.datetime.now().isoformat(timespec="seconds")
-    p = company_knowledge_path(code, "generated.json")
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
 @register("timeline")
 def process(code, events):
     """events: dart.classify_event() 계열 dict 리스트(report_nm/rcept_dt/rcept_no/event_type/
     reason/impact_score 등). 기존 timeline 에 신규만 추가 -> 최신순 정렬 -> 저장.
-    반환: 갱신된(또는 기존) generated.json 내용."""
-    data = _load(code)
+    반환: 갱신된(또는 기존) generated.json 내용. generated.json 이 있는데 파싱 실패하면
+    knowledge_io.load 가 예외를 던진다 — 빈 값으로 덮어써 기존 이력을 지우지 않기 위함."""
+    data = knowledge_io.load(code, "generated.json", _DEFAULT)
     existing_keys = {_event_key(e) for e in data.get("timeline", [])}
     added = 0
     for ev in events or []:
@@ -59,7 +45,7 @@ def process(code, events):
         added += 1
     data["timeline"] = sorted(data.get("timeline", []), key=lambda e: e.get("date") or "", reverse=True)
     if added:
-        _save(code, data)
+        knowledge_io.save(code, "generated.json", data)
     return data
 
 

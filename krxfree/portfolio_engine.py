@@ -40,9 +40,16 @@ def _load_json(path):
 
 
 def _company_tags(engine, code):
-    """Knowledge 태그 조회 — Search Layer 경유(merged.json 직접 읽지 않음)."""
-    hits = engine.search("", filters={"company_code": code}, top_k=1)
-    return hits[0].get("tags", []) if hits else []
+    """Knowledge 태그 조회 — Search Layer 경유(merged.json 직접 읽지 않음).
+
+    회사 단위 태그는 digest chunk 에 실려 있음(investment_case chunk 의 tags 는 그 case
+    하나의 태그일 뿐, 회사 전체 태그가 아님). digest chunk 가 아예 없는 종목(공시 이력 없음)
+    이면 investment_case chunk 들의 태그를 합쳐 근사한다 — 특정 케이스 태그로 오인하지 않게."""
+    digest_hits = engine.search("", filters={"company_code": code, "chunk_type": "digest"}, top_k=1)
+    if digest_hits:
+        return digest_hits[0].get("tags", [])
+    case_hits = engine.search("", filters={"company_code": code, "chunk_type": "investment_case"}, top_k=50)
+    return sorted({t for h in case_hits for t in h.get("tags", [])})
 
 
 def _position_value(h):

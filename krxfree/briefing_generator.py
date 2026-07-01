@@ -43,6 +43,19 @@ def _latest_snapshot():
     return _load_json(os.path.join(SNAPSHOT_DIR, files[-1]))
 
 
+def _snapshot_meta(snapshot):
+    """스냅샷 신선도. portfolio/risk 섹션이 오늘 데이터가 아닐 수 있음을 명시(추측 방지)."""
+    if not snapshot:
+        return {"date": None, "age_days": None, "stale": True, "note": "포트폴리오 스냅샷 없음"}
+    snap_date = snapshot.get("snapshot_date")
+    try:
+        age = (datetime.datetime.now() - datetime.datetime.strptime(snap_date, "%Y-%m-%d")).days
+    except Exception:
+        age = None
+    return {"date": snap_date, "age_days": age, "stale": bool(age and age >= 1),
+            "note": None if not age else f"{age}일 지난 스냅샷 — portfolio/risk 섹션이 오늘 기준이 아닐 수 있음"}
+
+
 def _headline(snapshot):
     """규칙 3: Risk Score 유의미한 악화(5점↑ 하락) 최우선. 그 다음 Portfolio Health 변화."""
     if not snapshot:
@@ -129,6 +142,7 @@ def build_schema():
         "schema_version": "1.0",
         "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
         "headline": _headline(snapshot),   # 규칙 2: portfolio 섹션보다 먼저 노출되는 최우선 한 줄
+        "snapshot_meta": _snapshot_meta(snapshot),   # portfolio/risk 섹션 신선도(며칠 지난 데이터인지)
         "market": {"indices": briefing.get("indices"), "macro": screen.get("macro")},
         "portfolio": {   # 규칙 2: health 를 이 섹션의 첫 필드로
             "health": (snapshot or {}).get("portfolio_health") or screen.get("portfolio_health"),

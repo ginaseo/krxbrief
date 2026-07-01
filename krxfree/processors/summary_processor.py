@@ -20,9 +20,9 @@ manual.json 이 향후 timeline 을 보완하게 되더라도(현재는 안 함)
 import sys
 import os
 import json
-import datetime
 
-from ..paths import company_knowledge_path, ROOT
+from ..paths import ROOT
+from . import knowledge_io
 from .registry import register
 
 _RULES_PATH = os.path.join(ROOT, "config", "digest_rules.json")
@@ -61,34 +61,23 @@ def _event_id(e):
     return e.get("rcept_no") or f"{e.get('event_type')}|{e.get('date')}|{e.get('reason')}"
 
 
-def _load(code, name):
-    p = company_knowledge_path(code, name)
-    try:
-        with open(p, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _save(code, filename, data):
-    data["last_updated"] = datetime.datetime.now().isoformat(timespec="seconds")
-    p = company_knowledge_path(code, filename)
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
 @register("summary")
 def process(code):
     """merged.json 의 timeline -> digest 재계산(변경 없는 기간은 재사용).
-    _source_ids 상태는 generated.json 에, 최종 결과는 merged.json 에도 반영. 반환: digest 리스트."""
-    generated = _load(code, "generated.json")
-    merged = _load(code, "merged.json")
+    _source_ids 상태는 generated.json 에, 최종 결과는 merged.json 에도 반영. 반환: digest 리스트.
+    generated.json 이 있는데 파싱 실패하면 knowledge_io.load 가 예외를 던진다 — 빈 값으로
+    덮어써 timeline 등 다른 필드를 지우지 않기 위함(merged.json 은 원래 없을 수도 있어 default={})."""
+    generated = knowledge_io.load(code, "generated.json", {"timeline": [], "digest": []})
+    merged = knowledge_io.load(code, "merged.json")
     timeline = merged.get("timeline") or generated.get("timeline", [])
     rules = _load_rules()
     unit = rules.get("period_unit", "month")
     include = rules.get("include_event_types")
     exclude = set(rules.get("exclude_event_types") or [])
     max_n = rules.get("max_events_per_period", 5)
+    # 규칙 자체가 바뀌면(기간단위/필터/최대개수 등) 기존 기간도 재계산해야 함 -> ids 와 별개로
+    # rules 스냅샷도 비교 대상에 포함(참조 재현 가능해야 한다는 원칙).
+    rules_key = json.dumps(rules, sort_keys=True, ensure_ascii=False)
 
     filtered = [e for e in timeline
                 if (include is None or e.get("event_type") in include) and e.get("event_type") not in exclude]
@@ -104,23 +93,23 @@ def process(code):
     for period, events in groups.items():
         ids = sorted({_event_id(e) for e in events})
         prev = prev_digest.get(period)
-        if prev and prev.get("_source_ids") == ids:
-            new_digest.append(prev)   # 이 기간은 안 바뀜 -> 그대로 재사용(재계산 안 함)
+        if prev and prev.get("_source_ids") == ids and prev.get("_rules_key") == rules_key:
+            new_digest.append(prev)   # 이 기간·규칙 둘 다 안 바뀜 -> 그대로 재사용(재계산 안 함)
             continue
         reasons = list(dict.fromkeys(e.get("reason") for e in events if e.get("reason")))[:max_n]
-        new_digest.append({"period": period, "events": reasons, "_source_ids": ids})
+        new_digest.append({"period": period, "events": reasons, "_source_ids": ids, "_rules_key": rules_key})
 
     reverse = rules.get("sort", "desc") == "desc"
     new_digest.sort(key=lambda d: d["period"], reverse=reverse)
 
     generated["digest"] = new_digest
     generated["digest_rules_applied"] = rules
-    _save(code, "generated.json", generated)
+    knowledge_io.save(code, "generated.json", generated)
 
     if merged:   # knowledge_merge 가 아직 안 돌았으면(독립 실행 등) merged.json 없을 수 있음
         merged["digest"] = [{k: v for k, v in d.items() if not k.startswith("_")} for d in new_digest]
         merged["digest_rules_applied"] = rules
-        _save(code, "merged.json", merged)
+        knowledge_io.save(code, "merged.json", merged)
     return new_digest
 
 

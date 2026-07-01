@@ -24,10 +24,14 @@ def load() -> dict:
 
 
 def save(state: dict):
+    """임시 파일에 쓴 뒤 os.replace 로 교체 — 쓰는 도중 프로세스가 죽어도 기존 파일이
+    반토막 난 채로 남지 않게(반토막 JSON -> load() 실패 -> seen_ids 초기화되는 사고 방지)."""
     state["generated"] = datetime.datetime.now().isoformat(timespec="seconds")
     state.setdefault("disclosures", {})
     state.setdefault("thesis", {})    # 스키마만 유지(추후 확장)
     state.setdefault("behavior", {})  # 스키마만 유지(추후 확장)
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    with open(_PATH, "w", encoding="utf-8") as f:
+    tmp_path = _PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, _PATH)

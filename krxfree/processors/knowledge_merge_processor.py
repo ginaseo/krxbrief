@@ -14,17 +14,8 @@ import sys
 import json
 import datetime
 
-from ..paths import company_knowledge_path
+from . import knowledge_io
 from .registry import register
-
-
-def _load(code, name):
-    p = company_knowledge_path(code, name)
-    try:
-        with open(p, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
 
 
 def _dedup_timeline(timeline):
@@ -42,15 +33,19 @@ def _dedup_timeline(timeline):
 
 @register("knowledge_merge")
 def process(code):
-    manual = _load(code, "manual.json")
-    dart_layer = _load(code, "dart.json")
-    generated = _load(code, "generated.json")
+    """manual.json/dart.json 이 있는데 파싱 실패하면 knowledge_io.load 가 예외를 던진다(빈 값
+    취급 금지 — 사용자가 채운 값이나 공식 데이터를 조용히 없는 것처럼 취급하면 안 됨). 셋 다
+    없는 건 정상(아직 미작성)."""
+    manual = knowledge_io.load(code, "manual.json")
+    dart_layer = knowledge_io.load(code, "dart.json")
+    generated = knowledge_io.load(code, "generated.json", {"timeline": [], "digest": [], "investment_cases": []})
 
     merged = {}
-    merged.update(dart_layer)   # 1) 공식 데이터
-    merged.update(generated)    # 2) 계산 결과(dart 보다 우선 — 최신 산출이므로)
+    merged.update(generated)   # 1) 계산 결과
+    merged.update(dart_layer)  # 2) 공식 데이터 — generated 보다 우선(문서/README 명시 순서)
     # 3) 사용자 입력은 값이 채워진 필드만 최우선 반영(빈 값으로 덮어써 기존 정보 지우지 않음)
-    merged.update({k: v for k, v in manual.items() if v not in (None, [], {}) and k != "investment_cases"})
+    EMPTY = (None, [], {}, "")
+    merged.update({k: v for k, v in manual.items() if v not in EMPTY and k != "investment_cases"})
 
     merged["timeline"] = _dedup_timeline(generated.get("timeline", []))
     # digest 는 파이프라인상 summary_processor 가 이 다음 단계에서 채운다(merged.json 기준으로
@@ -59,11 +54,8 @@ def process(code):
                                   for d in generated.get("digest", [])])
     merged.setdefault("investment_cases", generated.get("investment_cases", []))
     merged.setdefault("version", "1.0")
-    merged["last_updated"] = datetime.datetime.now().isoformat(timespec="seconds")
 
-    p = company_knowledge_path(code, "merged.json")
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(merged, f, ensure_ascii=False, indent=2)
+    knowledge_io.save(code, "merged.json", merged)
     return merged
 
 

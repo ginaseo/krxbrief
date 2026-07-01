@@ -12,6 +12,7 @@
 """
 
 import os
+import sys
 import json
 import datetime
 
@@ -39,7 +40,8 @@ from .paths import RESULTS_DIR
 from . import state as briefing_state
 try:
     from .processors import pipeline as knowledge_pipeline
-except Exception:
+except Exception as _e:
+    print(f"[knowledge] pipeline import 실패, Knowledge 갱신 비활성화: {_e}", file=sys.stderr)
     knowledge_pipeline = None
 
 OUT_DIR = RESULTS_DIR
@@ -236,6 +238,8 @@ def main():
     disclosure_map = {}   # {종목코드: {"dart": {event_type:[...]}, "krx": {event_type:[...]}}}
     excluded = set()      # HARD_EXCLUDE_TYPES 공시 -> 신규 후보만 제외, 보유종목은 Thesis 경고로 유지
     dart_codes = sorted(set(pool.index) | (HELD & set(cur.index)))
+    # today_dt 는 DART 유무와 무관하게 이후 Thesis 섹션(5-c')에서 항상 쓰임 -> if 블록 밖에서 계산.
+    today_dt = datetime.datetime.strptime(today, "%Y%m%d")
     if dart is not None:
         try:
             cmap = dart.load_corp_map()
@@ -245,7 +249,6 @@ def main():
             sectors = dart.sectors_for(dart_codes, cmap)  # company.json, 캐시
         except Exception:
             sectors = {}
-        today_dt = datetime.datetime.strptime(today, "%Y%m%d")
         disc_bgn_pool = (today_dt - datetime.timedelta(days=30)).strftime("%Y%m%d")
         disc_bgn_held = (today_dt - datetime.timedelta(days=365)).strftime("%Y%m%d")
         for code in dart_codes:
@@ -500,8 +503,8 @@ def main():
             # Knowledge(knowledge/company/{code}/) 증분 업데이트 — 실패해도 브리핑 생성은 계속되도록 격리.
             try:
                 knowledge_pipeline.run(code, all_events)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[knowledge] {code} 갱신 실패(브리핑은 계속 진행): {e}", file=sys.stderr)
 
         a_events = dart.level_a_events(flags)
         scored = [e for e in a_events if e.get("impact_score") is not None]
@@ -627,7 +630,7 @@ def main():
             return None  # 공시/뉴스/실적 체크 자체를 안 한 종목 -> 모르면 라벨 안 닮(오탐 방지)
         if _growth_good(code):
             return "실적 동반 상승"
-        if dart.event_types_present(disclosure_map.get(code) or {}) & dart.POSITIVE_BONUS_TYPES:
+        if dart is not None and dart.event_types_present(disclosure_map.get(code) or {}) & dart.POSITIVE_BONUS_TYPES:
             return "공시 모멘텀"
         nc = news_count_map.get(code)
         if nc is not None and nc <= NEWS_LOW_THRESHOLD:
@@ -677,9 +680,14 @@ def main():
                         key=lambda c: -float(final.loc[c, "score"]))
     def _disclosure_out(code):
         """disclosure_map[code] -> 출력용 dict. dart/krx 는 반드시 분리 유지, 빈 카테고리는 제거.
-        unfaithful_repeat_5y=0은 보존(0도 유의미 - "이번 건 제외 과거 반복 없음"). 내용 없으면 None."""
+        unfaithful_repeat_5y=0은 보존(0도 유의미 - "이번 건 제외 과거 반복 없음"). 내용 없으면 None.
+        `_days_ago`/`_weighted_impact` 등 내부 계산용 필드(밑줄 접두)는 공개 출력에서 제외."""
         d = disclosure_map.get(code) or {}
         out = {k: v for k, v in d.items() if k not in ("unfaithful_repeat_5y",) and v}
+        for cat in ("dart", "krx"):
+            if cat in out:
+                out[cat] = {et: [{k: v for k, v in it.items() if not k.startswith("_")} for it in items]
+                            for et, items in out[cat].items()}
         if d.get("unfaithful_repeat_5y") is not None:
             out["unfaithful_repeat_5y"] = d["unfaithful_repeat_5y"]
         return out or None
