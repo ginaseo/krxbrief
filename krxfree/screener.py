@@ -37,6 +37,10 @@ except Exception:
 from .loaders import load_members, load_held
 from .paths import RESULTS_DIR
 from . import state as briefing_state
+try:
+    from .processors import pipeline as knowledge_pipeline
+except Exception:
+    knowledge_pipeline = None
 
 OUT_DIR = RESULTS_DIR
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -491,6 +495,13 @@ def main():
                            for it in sorted_desc[:5]],
                 "seen_ids": all_ids,
             }
+
+        if knowledge_pipeline is not None:
+            # Knowledge(knowledge/company/{code}/) 증분 업데이트 — 실패해도 브리핑 생성은 계속되도록 격리.
+            try:
+                knowledge_pipeline.run(code, all_events)
+            except Exception:
+                pass
 
         a_events = dart.level_a_events(flags)
         scored = [e for e in a_events if e.get("impact_score") is not None]

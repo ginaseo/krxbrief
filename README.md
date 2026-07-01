@@ -19,6 +19,43 @@
    - 다중 팩터(모멘텀·가치·유동성·사이즈) 점수화 + 기술적·재무 가점으로 추천
    - 유니버스: KRX 로그인 시 코스피200 구성종목 **자동 조회**, 아니면 시총 상위 200 근사
 3. **무인 자동화** — `automation/` (Windows 작업 스케줄러, 매 영업일 08:05)
+4. **Knowledge Engine** — `knowledge/company/{종목코드}/` 에 기업별 공시 이력·투자 Investment Case 를
+   장기 누적(스크리너 실행마다 자동 증분 업데이트). 아래 [Knowledge Engine](#knowledge-engine) 참조.
+
+---
+
+## Knowledge Engine
+
+`results/*.json` 은 매번 새로 덮어써지는 **일회성 브리핑 데이터**지만, `knowledge/company/{종목코드}/`
+는 시간이 지날수록 쌓이는 **장기 데이터**다. 스크리너(`python -m krxfree.screener`) 를 돌릴 때마다
+보유종목의 공시 이벤트가 자동으로 여기 누적된다(삭제 없음, 증분만).
+
+파일 4개 중 **`manual.json` 만 직접 편집하는 파일**이고 나머지는 자동 생성(커밋 안 됨):
+
+| 파일 | 누가 채우나 | 우선순위 |
+|---|---|---|
+| `manual.json` | **사용자가 직접 작성** | 최우선 |
+| `dart.json` | (예정, 아직 없음) | 2순위 |
+| `generated.json` | Processor 자동 계산(timeline 등) | 3순위 |
+| `merged.json` | 위 3개를 합친 최종 결과 | — |
+
+### Investment Case 정의하기
+
+`knowledge/company/005930/manual.json` 을 직접 만들어서 관심 있는 투자 테마를 정의하면,
+그 종목 timeline 에서 키워드가 매칭되는 공시만 모아 자동으로 상태(강화/유지/약화)·추세·근거를 계산한다:
+
+```json
+{
+  "investment_cases": [
+    {"name": "HBM 성장", "keywords": ["HBM", "고대역폭메모리"], "importance": 95}
+  ]
+}
+```
+
+- `keywords` 에 매칭되는 공시가 없으면 그 case 는 그냥 "관련 이벤트 없음"으로 남는다(테마를 억지로 지어내지 않음).
+- `status`/`trend`/`reason`은 매칭된 실제 공시의 `impact_score`·날짜로만 계산(LLM 추론 없음, 재현 가능).
+- `founder`/`ceo`/`website`/`products`/`competitors` 같은 필드도 같은 방식으로 `manual.json` 에 채워 넣으면
+  `merged.json` 에 최우선으로 반영된다(DART 가 안 주는 정보라 자동 채움은 없음).
 
 ---
 
